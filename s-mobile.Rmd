@@ -1,0 +1,384 @@
+<<<<<<< HEAD
+
+=======
+----
+>>>>>>> fbe7c458399c0f8b0ce1e73a528127ebae7cb661
+title: S-Mobile: Predicting Customer Churn
+output: github_document
+---
+
+
+
+```{r r_setup, include = FALSE}
+## initial settings
+knitr::opts_chunk$set(
+  comment = NA,
+  echo = TRUE,
+  error = TRUE,
+  cache = FALSE,
+  message = FALSE,
+  dpi = 96,
+  warning = FALSE
+)
+
+## width to use when printing tables etc.
+options(
+  width = 250,
+  scipen = 100,
+  max.print = 5000,
+  stringsAsFactors = FALSE
+)
+
+## load radiant packages if neededi
+if (!exists("r_environment")) library(radiant)
+```
+
+<style>
+.table {
+  width: auto;
+}
+ul, ol {
+  padding-left: 18px;
+}
+pre, code, pre code {
+  overflow: auto;
+  white-space: pre;
+  word-wrap: normal;
+  background-color: #ffffff;
+}
+</style>
+
+
+
+1. Develop a model to predict customer churn
+2. Use model output to understand the main drivers of churn
+3. Use insights on churn drivers to develop actions/offers/incentives
+4. Quantify the impact of these actions/offers/incentives on the probability of churn
+5. Decide which actions/offers/incentives to target to which customers
+6. Evaluate the economics
+
+```{r}
+## Loading the data from Dropbox/MGTA455-2018/data/
+s_mobile_wrk <- readr::read_rds(file.path(radiant.data::find_dropbox(), "MGTA455-2018/data/s_mobile.rds"))
+```
+
+
+
+#### Data transformation and split
+
+Firstly, we observed each variable's distribution and found that distributions of some continuous variables are highly skewed. So we decided to apply log-transformation to those variables.And for some variables which contain a lot of zero values, in order to do log-transformation, we add value 1 to those values.
+
+```{r}
+library(dplyr)
+
+s_mobile_wrk <- s_mobile_wrk %>% 
+  mutate(mou_ln = log(mou+1),revenue_ln = log(revenue+1),overage_ln = log(overage+1),months_ln = log(months),eqpdays_ln = log(eqpdays+1)) 
+
+train<-s_mobile_wrk %>%
+  filter(training==1)
+
+
+valid<-s_mobile_wrk %>%
+  filter(training==0)
+
+
+test<-s_mobile_wrk %>%
+  filter(representative==1)
+```
+
+### 1. Develop Model
+
+In order to get a better understanding of the model, we firstly performed neural network model and get insights from Garson plot. From there, we can see top importance factors are eqpdays,highcreditr, retcalls, mou, months, overage, refurb, roam, phones, occupation|retired. And in neural network model, we can see that the AUC is 0.629. And then giving the insights, we also perform the logistic model with interactions, and then the results also give 0.629 AUC. Since both neural network and logistic models genereate same AUC value and logistic model can help us to interpret the results, we use logistic model as our final model.
+
+#### a. Basic logistic model
+
+We develop the logistic model with transformed variables and interactions, and we also make sure the model is standardized.
+
+```{r}
+
+
+train_model <- logistic(
+  dataset = train, 
+  rvar = "churn", 
+  evar = c(
+    "changer", "changem", "revenue_ln", "mou_ln", "overage_ln", "roam", 
+    "threeway", "months_ln", "uniqsubs", "phones", "custcare", 
+    "retcalls", "dropvce", "blckvce", "unansvce", "eqpdays_ln", 
+    "refurb", "smartphone", "children", "highcreditr", "mcycle", 
+    "car", "travel", "region", "occupation"
+  ), 
+  int = c(
+    "months:phones", "months:eqpdays", "months:refurb", "months:smartphone", 
+    "phones:eqpdays", "phones:refurb", "phones:smartphone", 
+    "dropvce:smartphone", "dropvce:occupation"
+  ), 
+  lev = "yes",
+  check = "standardize"
+)
+summary(train_model)
+```
+
+Test for overfit and AUC
+
+```{r}
+
+pred<-predict(train_model,pred_data = valid)
+compare_matrix_dat<-as.data.frame(cbind(pred$Prediction,valid$churn))
+colnames(compare_matrix_dat)<-c("Prediction","churn")
+compare_matrix_dat$churn<-ifelse(compare_matrix_dat$churn==1,1,0)
+
+
+conf_matrix <- confusion(
+  dataset = compare_matrix_dat, 
+  pred = "Prediction", 
+  rvar = "churn", 
+  lev = 1
+)
+summary(conf_matrix)
+```
+
+Output the importance of each variable
+
+```{r}
+write.coeff(train_model,file="coeff_data")
+header<-read.csv("coeff_data",skip=1,header = F,nrows = 1,as.is = T)
+coeff_dat<-read.csv("coeff_data",skip=3,header = F)
+colnames(coeff_dat)<-header
+
+
+```
+
+#### b. Neural Network model
+
+Here is the neural network model:
+
+```{r fig.width = 7, fig.height = 10.98, dpi = 96}
+result <- ann(
+  dataset = train, 
+  rvar = "churn", 
+  evar = c(
+    "changer", "changem", "revenue_ln", "mou_ln", "overage_ln", "roam", 
+    "threeway", "months_ln", "uniqsubs", "phones", "custcare", 
+    "retcalls", "dropvce", "blckvce", "unansvce", "eqpdays_ln", 
+    "refurb", "smartphone", "children", "highcreditr", "mcycle", 
+    "car", "travel", "region", "occupation"
+  ), 
+  lev = "yes", 
+  size = 1,
+  decay = 0.6,
+  seed = 1234
+)
+plot(result, plots = "garson", custom = FALSE)
+
+# Top importance factors: highcreditr,eqpdays,mou, retcalls, occupation|retired, refurb, roam, overage, changem, changer, revenue
+
+```
+
+Overfitting check
+
+```{r}
+
+
+valid$pred_nn_valid <- predict(result, pred_data = valid)$Prediction
+train$pred_nn_train <- predict(result, pred_data = train)$Prediction
+
+result <- confusion(
+  dataset = valid, 
+  pred = "pred_nn_valid", 
+  rvar = "churn", 
+  lev = "yes", 
+  train = "All" 
+)
+
+auc_nn_valid <- result$dat$AUC
+
+result <- confusion(
+  dataset = train, 
+  pred = "pred_nn_train", 
+  rvar = "churn", 
+  lev = "yes", 
+  train = "All"
+)
+
+auc_nn_train <- result$dat$AUC
+```
+
+Tunning process:
+
+```{r eval=FALSE}
+### NN model tuning 
+library(caret)
+nn_grid=expand.grid(size=c(1:6),decay=(1:8)*0.1)
+system.time(nn_mod <- train(churn~.-customer-training-representative, train, method='nnet', tuneGrid=nn_grid,
+                metric="ROC",
+                trControl=trainControl(method = "cv",
+                          number = 5,
+                           classProbs = TRUE,
+                           summaryFunction = twoClassSummary)))
+# weights:  37
+# The final values used for the model were size = 1 and decay = 0.6.
+
+
+```
+
+
+
+### 2. Understand Main Drivers
+
+
+```{r}
+colnames(coeff_dat)[1]<-"Variable"
+
+
+coeff_dat<-coeff_dat %>%
+  arrange(desc(importance))
+
+top5_name<-as.data.frame(head(coeff_dat$Variable,5))
+top5_or<-as.data.frame(head(coeff_dat$OR,5))
+
+coeff_dat
+
+cat("From the coefficient output file, we see from the importance colume that the top five drivers are",
+    top5_name$`head(coeff_dat$Variable, 5)`[1],"with OR of",top5_or$`head(coeff_dat$OR, 5)`[1],
+     ",",top5_name$`head(coeff_dat$Variable, 5)`[2],"with OR of",top5_or$`head(coeff_dat$OR, 5)`[2],
+     ",",top5_name$`head(coeff_dat$Variable, 5)`[3],"with OR of",top5_or$`head(coeff_dat$OR, 5)`[3],
+     ",",top5_name$`head(coeff_dat$Variable, 5)`[4],"with OR of",top5_or$`head(coeff_dat$OR, 5)`[4],
+     ",",top5_name$`head(coeff_dat$Variable, 5)`[5],"with OR of",top5_or$`head(coeff_dat$OR, 5)`[5])
+  
+```
+
+From the summary of standardized logistic regression results, we can see that with one unit of highcredit increase, churn rate will decrease by 52.5% in odds-ratio by keeping other variables constant; With one standardized unit of mou_ln increase, churn rate will decrease by 0.411 in odds-ratio by keeping other variables constant; with one standardized unit of eqpdays_ln increase, churn rate will increase by 57.84% by keeping other variables constant; with one standardized unit of retcalls increase, churn rate will increase by 31.48% by keeping other variables constant.
+
+### 3.Insights based on importance based on categories
+
+From Part2 We can then see some actions we can make:
+
+1. Customer characteristic: Highcredit
+
+For customes with high credit, it is not an actionable during short period of time. So what we can possible do is that to set up more incentives through other variables so that we will have more high credit customers.it is not possible an immediate action.
+
+2. Equipment characteristic: eqpdays
+
+offer trade-in for people who has been hold the old cellphone for certain days.
+
+3. Customer Usage: mou
+
+For those customers that have overage, we will try to use the difference from churn rates and then use the difference to pay for the overage amount.
+
+4. Customer Usage: overage
+
+If a customer has more overage, then it will have a positive effect on the churn rate. THat means, we should do more incentives to the overage portion of the customer. 
+
+5. Customer action: retcalls 
+
+We see that if a customer makes more calls to S-mobile, that means the customer will be more likely not to churn in the furture. So we should do a incentive such as cash back to these specific customers
+
+
+### 4. Actions we choose
+
+**a. eqpdays**
+
+Action: send offers/incentives to customers who has eqpdays more than about 365 days for a cell-phone replacement plan, what we want is to lower the churn rate for all those people who has more than 365 epqdays value. Since we see that more eqpdays, the higher the churn rate. 
+Here we set epdays as if they were all 180 days is because in average, we will have customer who is in 180 days period, but this is a average measure of about 365 days as we are not consider worst case in our test, rather, we are consider average case.
+
+```{r}
+pred_eqpdays <- predict(train_model, pred_data = test, pred_cmd = "eqpdays_ln=log(180+1)")
+pred_eqpdays$Prediction<-(pred_eqpdays$Prediction)/((pred_eqpdays$Prediction)+(1-(pred_eqpdays$Prediction))*(1-0.02)/0.02)
+
+eqpdays_value<-mean(pred_eqpdays$Prediction)
+
+ltv_func<-function(churn){
+ltv <- as.data.frame(matrix(nrow = 6,ncol = 60))
+rownames(ltv) <- c("revenues","costs","Profits","prob. active at end of period","profit expected on average","present value of the profits")
+churn_rate <- churn
+#churn_rate <- 0.02
+dis_rate <- .008
+ltv[1,] <- mean(test$revenue)
+ltv[2,] <- 0
+ltv[3,] <- ltv[1,] 
+for (i in 1:60){
+  ltv[4,i] <- (1-churn_rate)^(i-1)
+}
+ltv[5,] <- ltv[3,]*ltv[4,]
+ltv[6,] <- ltv[5,]/(1+dis_rate)
+finalvalue <- sum(ltv[6,])
+colnames(ltv) <- paste0("month",1:60)
+ltv<-cbind(ltv,finalvalue)
+ltv
+}
+
+#ltv_func(eqpdays_value)-ltv_func(0.02)
+ltv_diff_eqpdays<-ltv_func(eqpdays_value)$finalvalue[1]-ltv_func(0.02)$finalvalue[1]
+
+```
+From above calculation, we are going to put 117.599 dollars in average as an incentive/deductable for a trade-in cellphone offer to those customer with more than 365 days.In this way, we can make sure that all of our customer's eqpdays value is within 365 days range and lowers our churn rate from 2% to 1.44%.
+
+
+
+**b. mou & overage**
+
+```{r}
+
+test$percent <- test$overage/test$mou
+test$percent[is.na(test$percent)] <- 0
+test$group <- xtile(test$percent,n=4,rev=T)
+
+ggplot(test,aes(x=group))+
+  geom_bar(position = "dodge")
+
+
+### prediction
+pred_group <- predict(train_model, pred_data = test, pred_cmd = "overage_ln = log(1)")
+test$overage_pred <-(pred_group$Prediction)/((pred_group$Prediction)+(1-(pred_group$Prediction))*(1-0.02)/0.02)
+
+group_churn <- test %>% group_by(group) %>%
+  summarise( ave_churn = mean(overage_pred))
+
+group1 <- ltv_func(group_churn$ave_churn[1])$finalvalue[1] - ltv_func(0.02)$finalvalue[1]
+group2 <- ltv_func(group_churn$ave_churn[2])$finalvalue[1] - ltv_func(0.02)$finalvalue[1]
+group3 <- ltv_func(group_churn$ave_churn[3])$finalvalue[1] - ltv_func(0.02)$finalvalue[1]
+group4 <- ltv_func(group_churn$ave_churn[4])$finalvalue[1] - ltv_func(0.02)$finalvalue[1]
+
+ltv_diff <- rbind(group1,group2,group3,group4)
+colnames(ltv_diff) <- "ltv_diff"
+ltv_diff
+```
+
+As can be seen from the previous analysis, "mou", which stands for mean monthly minutes of use, is an important variable affecting the churn rate. In the meantime, "overage", which stands for mean monthly overage minutes is highly related to "mou". Therefore, we hope to put forward an incentive plan taking both variables into account and divide our customers into four groups based on the overage rate, that is overage/mou. The overall churn rate is 1.745%.
+
+Steps:
+Firstly, we assume there is no overage after using our incentive plan and predict the new average churn rate according to different groups. Then we can calculate the difference in LTV. 
+
+Plan:
+According to the table, our strategy is that we can offer family minutes to encourage them call their family members as much as possible. The detailed strategy is that if customers' minutes of use reach the set level, we would refund the equivalent worth of minutes for each group's difference of LTV, that is, offering $108.97 worth of munitues for group1, offering $287.84 worth of munitues for group2, offering $280.72 worth of munitues for group3, offering $49.28 worth of munitues for group4.
+
+**c. retcalls**
+
+We now condiser the retcalls part, We will come up with some incentives/offers/cash back to customers who made phone call to the rentetion team. What we want is to set the retcalls value as close to 0 as possible. Now here keep in mind that retcalls is just a measure of number of calls, what is behind it is the feeling/satifaction of the customer, so ultimately, what we want is to make those people who has made phone calls satisfy with our incentives/offers.
+
+```{r}
+pred_retcalls <- predict(train_model, pred_data = test, pred_cmd = "retcalls=0")
+pred_retcalls$Prediction<-(pred_retcalls$Prediction)/((pred_retcalls$Prediction)+(1-(pred_retcalls$Prediction))*(1-0.02)/0.02)
+
+retcalls_value<-mean(pred_retcalls$Prediction)
+
+#ltv_func(eqpdays_value)-ltv_func(0.02)
+
+ltv_diff_retcalls<-ltv_func(retcalls_value)$finalvalue[1]-ltv_func(0.02)$finalvalue[1]
+
+
+ltv_diff_retcalls
+
+```
+
+From The above calculation, we could offer 24.8578 dollars just as "customer bonus" or some equivalent incentives to the customers who made phone call.
+
+## Conclusion
+
+Overall, we have eqpdays for $117.599 dollars, retcalls for $24.8578 and $108.97 worth of munitues for group1 in mou methond, offering $287.84 worth of munitues for group2, offering $280.72 worth of munitues for group3, offering $49.28 worth of munitues for group4.
+
+we suggest that S-mobile should use the mou/overage as one of the main factor for them to gain a lower churn rate.
+
+
+
+
